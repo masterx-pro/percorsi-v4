@@ -1,14 +1,10 @@
 """
-Percorsi Android Pro v3.1 - Ottimizzatore di Percorsi
+Percorsi Android Pro v3.2 - Ottimizzatore di Percorsi
 Autore: Mattia Prosperi
 
-Features:
-- Gestione Excel/CSV robusta con multiple encoding
-- File picker Android nativo + fallback Kivy
-- Permessi Android gestiti automaticamente
-- Multi-operatore con clustering geografico
-- Export Excel/GPX/KML
-- Mappa integrata
+- Gestione Excel/CSV robusta
+- Fallback CSV se openpyxl non disponibile
+- File picker Android
 """
 
 import os
@@ -41,11 +37,19 @@ try:
 except:
     REQUESTS_AVAILABLE = False
 
+# Openpyxl - prova import con gestione errori dettagliata
+OPENPYXL_AVAILABLE = False
+OPENPYXL_ERROR = ""
 try:
     import openpyxl
     OPENPYXL_AVAILABLE = True
-except:
-    OPENPYXL_AVAILABLE = False
+    Logger.info("Percorsi: openpyxl DISPONIBILE")
+except ImportError as e:
+    OPENPYXL_ERROR = str(e)
+    Logger.warning(f"Percorsi: openpyxl NON disponibile: {e}")
+except Exception as e:
+    OPENPYXL_ERROR = str(e)
+    Logger.error(f"Percorsi: Errore openpyxl: {e}")
 
 try:
     from plyer import filechooser as plyer_fc
@@ -53,8 +57,7 @@ try:
 except:
     PLYER_AVAILABLE = False
 
-# API Key ORS (sostituire con la propria)
-ORS_API_KEY = "5b3ce3597851110001cf6248xxxxxxxxxxxxxxxxxxxxxxxx"
+# Cache distanze
 DIST_CACHE = {}
 
 def log_debug(msg):
@@ -164,21 +167,17 @@ def divide_for_operators(indices, coords, num_ops, items_per, mode="haversine"):
     if num_ops <= 1 or len(indices) == 0:
         return [indices]
     
-    # Clustering semplice per distanza dal centroide
     centroid = (sum(coords[i][0] for i in indices)/len(indices),
                 sum(coords[i][1] for i in indices)/len(indices))
     
-    # Ordina per distanza dal centroide
     sorted_idx = sorted(indices, key=lambda i: haversine(coords[i][0], coords[i][1], centroid[0], centroid[1]))
     
-    # Distribuisci agli operatori
     assignments = [[] for _ in range(num_ops)]
     for i, idx in enumerate(sorted_idx):
         op = i % num_ops
         if len(assignments[op]) < items_per:
             assignments[op].append(idx)
     
-    # Ottimizza ogni percorso
     result = []
     for op_idx in assignments:
         if len(op_idx) > 1:
@@ -199,7 +198,7 @@ def generate_gmaps_link(coords, max_wp=10):
         links.append(f"https://www.google.com/maps/dir/{pts}")
     return links
 
-# ==================== EXCEL FUNCTIONS (ROBUST) ====================
+# ==================== FILE FUNCTIONS ====================
 def safe_str(val):
     if val is None:
         return ''
@@ -238,7 +237,7 @@ def read_csv_robust(filepath):
             continue
     
     if not content:
-        return None, "Errore encoding file"
+        return None, "Errore lettura file (encoding)"
     
     lines = [l for l in content.strip().split('\n') if l.strip()]
     if len(lines) < 2:
@@ -281,7 +280,7 @@ def read_xlsx_robust(filepath):
     log_debug(f"Lettura XLSX: {filepath}")
     
     if not OPENPYXL_AVAILABLE:
-        return None, "openpyxl non disponibile"
+        return None, f"Libreria openpyxl non disponibile.\n\nUsa file CSV invece di XLSX.\n\nErrore: {OPENPYXL_ERROR}"
     
     try:
         wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
@@ -306,7 +305,7 @@ def read_xlsx_robust(filepath):
         return {'headers': headers, 'rows': rows}, headers
     except Exception as e:
         log_error(f"Errore XLSX: {e}")
-        return None, str(e)
+        return None, f"Errore lettura Excel: {str(e)}"
 
 def read_file_auto(filepath):
     """Legge file automaticamente in base all'estensione"""
@@ -320,37 +319,65 @@ def read_file_auto(filepath):
         return None, "File troppo grande (max 50MB)"
     
     ext = os.path.splitext(filepath)[1].lower()
+    log_debug(f"Estensione file: {ext}")
     
     if ext == '.csv':
         return read_csv_robust(filepath)
     elif ext in ['.xlsx', '.xlsm']:
+        if not OPENPYXL_AVAILABLE:
+            return None, f"File Excel non supportato!\n\nSalva il file come CSV e riprova.\n\n(openpyxl non disponibile: {OPENPYXL_ERROR})"
         return read_xlsx_robust(filepath)
     elif ext == '.xls':
+        return None, "Formato .xls non supportato.\n\nApri il file in Excel e salvalo come CSV."
+    else:
         # Prova come CSV
         return read_csv_robust(filepath)
-    else:
-        # Prova come CSV generico
-        return read_csv_robust(filepath)
 
-def export_excel(data_rows, filepath):
-    """Esporta in Excel"""
-    if not OPENPYXL_AVAILABLE:
-        return False, "openpyxl non disponibile"
-    
+def write_csv(data_rows, filepath):
+    """Esporta in CSV"""
     try:
-        wb = openpyxl.Workbook()
-        ws = wb.active
+        if not data_rows:
+            return False, "Nessun dato"
         
-        if data_rows:
-            cols = list(data_rows[0].keys())
-            ws.append(cols)
-            for row in data_rows:
-                ws.append([row.get(c, '') for c in cols])
+        cols = list(data_rows[0].keys())
+        lines = [';'.join(str(c) for c in cols)]
         
-        wb.save(filepath)
+        for row in data_rows:
+            line = ';'.join(str(row.get(c, '')) for c in cols)
+            lines.append(line)
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+        
         return True, filepath
     except Exception as e:
         return False, str(e)
+
+def export_data(data_rows, filepath):
+    """Esporta dati - usa openpyxl se disponibile, altrimenti CSV"""
+    if OPENPYXL_AVAILABLE and filepath.endswith('.xlsx'):
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            
+            if data_rows:
+                cols = list(data_rows[0].keys())
+                ws.append(cols)
+                for row in data_rows:
+                    ws.append([row.get(c, '') for c in cols])
+            
+            wb.save(filepath)
+            return True, filepath
+        except Exception as e:
+            log_error(f"Errore export xlsx: {e}")
+            # Fallback a CSV
+            csv_path = filepath.replace('.xlsx', '.csv')
+            return write_csv(data_rows, csv_path)
+    else:
+        # Usa CSV
+        if filepath.endswith('.xlsx'):
+            filepath = filepath.replace('.xlsx', '.csv')
+        return write_csv(data_rows, filepath)
 
 # ==================== ANDROID PERMISSIONS ====================
 def request_permissions():
@@ -520,7 +547,7 @@ ScreenManager:
                     pos: self.pos
                     size: self.size
             Label:
-                text: 'PERCORSI PRO v3.1'
+                text: 'PERCORSI PRO v3.2'
                 font_size: '24sp'
                 bold: True
                 color: 1, 0.5, 0.2, 1
@@ -544,7 +571,7 @@ ScreenManager:
                         size_hint_y: None
                         height: 30
                     Button:
-                        text: '[b]CARICA FILE EXCEL/CSV[/b]'
+                        text: '[b]CARICA FILE CSV/EXCEL[/b]'
                         markup: True
                         size_hint_y: None
                         height: 55
@@ -634,19 +661,23 @@ ScreenManager:
                 font_size: '18sp'
                 bold: True
         
+        # Info formato
+        Label:
+            id: format_info
+            text: 'Formati: CSV (consigliato), XLSX'
+            size_hint_y: None
+            height: 30
+            color: 0.6, 0.8, 0.6, 1
+            font_size: '13sp'
+        
         BoxLayout:
             orientation: 'vertical'
             padding: 10
             spacing: 10
             
-            Label:
-                text: 'Seleziona cartella:'
-                size_hint_y: None
-                height: 30
-            
             Spinner:
                 id: path_spinner
-                text: 'Seleziona...'
+                text: 'Seleziona cartella...'
                 values: []
                 size_hint_y: None
                 height: 45
@@ -655,15 +686,15 @@ ScreenManager:
             FileChooserListView:
                 id: file_chooser
                 path: app.get_default_path()
-                filters: ['*.xlsx', '*.xls', '*.csv', '*.XLSX', '*.CSV']
-                size_hint_y: 0.5
+                filters: ['*.csv', '*.CSV', '*.xlsx', '*.XLSX']
+                size_hint_y: 0.55
                 on_selection: app.on_file_select(self.selection)
             
             Label:
                 id: file_status
                 text: 'Nessun file selezionato'
                 size_hint_y: None
-                height: 40
+                height: 35
                 color: 0.7, 0.7, 0.7, 1
             
             BoxLayout:
@@ -671,7 +702,7 @@ ScreenManager:
                 height: 55
                 spacing: 10
                 Button:
-                    text: 'FILE PICKER NATIVO'
+                    text: 'FILE PICKER'
                     background_color: 0.3, 0.5, 0.6, 1
                     background_normal: ''
                     on_release: app.open_native_picker()
@@ -1013,7 +1044,7 @@ ScreenManager:
                 
                 CardBox:
                     size_hint_y: None
-                    height: 120
+                    height: 140
                     Label:
                         text: 'STATO SISTEMA'
                         bold: True
@@ -1025,7 +1056,9 @@ ScreenManager:
                         text: 'Verifica...'
                         font_size: '12sp'
                         size_hint_y: None
-                        height: 60
+                        height: 80
+                        halign: 'left'
+                        text_size: self.size
 
 <ProcessingScreen>:
     name: 'processing'
@@ -1292,7 +1325,7 @@ ScreenManager:
                         size_hint_y: None
                         height: 30
                     Button:
-                        text: 'EXCEL (.xlsx)'
+                        text: 'CSV / EXCEL'
                         size_hint_y: None
                         height: 50
                         background_color: 0.2, 0.6, 0.3, 1
@@ -1350,7 +1383,7 @@ class PercorsiApp(App):
     selected_file = StringProperty('')
     
     def build(self):
-        self.title = 'Percorsi Pro v3.1'
+        self.title = 'Percorsi Pro v3.2'
         if platform not in ('android', 'ios'):
             Window.size = (400, 750)
         self.load_routes()
@@ -1366,16 +1399,31 @@ class PercorsiApp(App):
             self.refresh_routes_ui()
             self._update_sys_status()
             self._init_paths()
+            self._update_format_info()
         except Exception as e:
             log_error(f"Init: {e}")
+    
+    def _update_format_info(self):
+        """Aggiorna info formati supportati"""
+        try:
+            scr = self.root.get_screen('load_excel')
+            if OPENPYXL_AVAILABLE:
+                scr.ids.format_info.text = "Formati: CSV, XLSX"
+                scr.ids.format_info.color = (0.5, 0.8, 0.5, 1)
+            else:
+                scr.ids.format_info.text = "Solo CSV (XLSX non supportato)"
+                scr.ids.format_info.color = (1, 0.7, 0.3, 1)
+        except:
+            pass
     
     def _update_sys_status(self):
         try:
             scr = self.root.get_screen('settings')
+            xlsx_status = "OK" if OPENPYXL_AVAILABLE else f"NO ({OPENPYXL_ERROR[:30]})"
             lines = [
-                f"openpyxl: {'OK' if OPENPYXL_AVAILABLE else 'NO'}",
-                f"requests: {'OK' if REQUESTS_AVAILABLE else 'NO'}",
-                f"plyer: {'OK' if PLYER_AVAILABLE else 'NO'}",
+                f"Excel (openpyxl): {xlsx_status}",
+                f"CSV: OK",
+                f"Rete (requests): {'OK' if REQUESTS_AVAILABLE else 'NO'}",
                 f"Platform: {platform}"
             ]
             scr.ids.sys_status.text = '\n'.join(lines)
@@ -1399,6 +1447,7 @@ class PercorsiApp(App):
     # ==================== FILE LOADING ====================
     def go_load_excel(self):
         self._init_paths()
+        self._update_format_info()
         self.root.current = 'load_excel'
     
     def change_path(self, path):
@@ -1416,7 +1465,16 @@ class PercorsiApp(App):
                 fp = selection[0]
                 name = os.path.basename(fp)
                 size = os.path.getsize(fp) / 1024
-                scr.ids.file_status.text = f"Sel: {name} ({size:.1f} KB)"
+                ext = os.path.splitext(fp)[1].lower()
+                
+                # Avvisa se xlsx e openpyxl non disponibile
+                if ext == '.xlsx' and not OPENPYXL_AVAILABLE:
+                    scr.ids.file_status.text = f"{name} - XLSX non supportato! Usa CSV"
+                    scr.ids.file_status.color = (1, 0.4, 0.4, 1)
+                else:
+                    scr.ids.file_status.text = f"Sel: {name} ({size:.1f} KB)"
+                    scr.ids.file_status.color = (0.7, 0.7, 0.7, 1)
+                
                 self.selected_file = fp
             else:
                 scr.ids.file_status.text = "Nessun file selezionato"
@@ -1426,12 +1484,12 @@ class PercorsiApp(App):
     
     def open_native_picker(self):
         if not PLYER_AVAILABLE:
-            self.popup("Info", "File picker nativo non disponibile")
+            self.popup("Info", "File picker nativo non disponibile.\n\nUsa il selettore file sopra.")
             return
         try:
             plyer_fc.open_file(
                 on_selection=self._on_native_select,
-                filters=[("Excel/CSV", "*.xlsx", "*.xls", "*.csv")]
+                filters=[("CSV/Excel", "*.csv", "*.xlsx")]
             )
         except Exception as e:
             self.popup("Errore", str(e))
@@ -1462,8 +1520,19 @@ class PercorsiApp(App):
             return
         
         ext = os.path.splitext(filepath)[1].lower()
-        if ext not in ['.xlsx', '.xls', '.csv', '.xlsm']:
-            self.popup("Errore", f"Formato non supportato: {ext}")
+        
+        # Check xlsx senza openpyxl
+        if ext == '.xlsx' and not OPENPYXL_AVAILABLE:
+            self.popup("Formato non supportato", 
+                      "I file XLSX non sono supportati su questo dispositivo.\n\n"
+                      "SOLUZIONE:\n"
+                      "1. Apri il file in Excel\n"
+                      "2. Salva come CSV\n"
+                      "3. Carica il file CSV")
+            return
+        
+        if ext not in ['.xlsx', '.csv', '.xlsm']:
+            self.popup("Errore", f"Formato non supportato: {ext}\n\nUsa CSV o XLSX")
             return
         
         self._show_loading()
@@ -1473,6 +1542,7 @@ class PercorsiApp(App):
                 data, cols = read_file_auto(filepath)
                 Clock.schedule_once(lambda dt: self._on_loaded(data, cols, filepath), 0)
             except Exception as e:
+                log_error(f"Load error: {e}")
                 Clock.schedule_once(lambda dt: self._on_load_error(str(e)), 0)
         
         threading.Thread(target=do, daemon=True).start()
@@ -1494,7 +1564,7 @@ class PercorsiApp(App):
     def _on_loaded(self, data, cols, filepath):
         self._hide_loading()
         if data is None:
-            self.popup("Errore", cols)
+            self.popup("Errore Caricamento", str(cols))
             return
         
         self.excel_data = data
@@ -1526,6 +1596,7 @@ class PercorsiApp(App):
             scr.ids.addr_col.values = opts
             scr.ids.op_col.values = opts
             
+            # Auto-detect
             for c in cols:
                 u = c.upper()
                 if 'LAT' in u:
@@ -1583,11 +1654,9 @@ class PercorsiApp(App):
                 
                 self.coords.append((lat, lon))
                 
-                # Salva riga originale
                 rd = {h: safe_str(row[i] if i < len(row) else '') for i, h in enumerate(hdrs)}
                 self.orig_data.append(rd)
                 
-                # Label
                 parts = []
                 if label_i >= 0 and label_i < len(row) and row[label_i]:
                     parts.append(safe_str(row[label_i]))
@@ -1596,7 +1665,7 @@ class PercorsiApp(App):
                 self.labels.append(' - '.join(parts) if parts else f"Punto {len(self.coords)}")
         
         if len(self.coords) < 2:
-            self.popup("Errore", f"Solo {len(self.coords)} coordinate valide")
+            self.popup("Errore", f"Solo {len(self.coords)} coordinate valide.\n\nVerifica le colonne selezionate.")
             return
         
         self._run_opt()
@@ -1667,13 +1736,6 @@ class PercorsiApp(App):
         except:
             pass
     
-    def _set_status(self, txt):
-        try:
-            scr = self.root.get_screen('processing')
-            scr.ids.progress_txt.text = txt
-        except:
-            pass
-    
     def _do_opt(self):
         def cb(p):
             Clock.schedule_once(lambda dt: self._set_progress(p), 0)
@@ -1681,8 +1743,6 @@ class PercorsiApp(App):
         try:
             mode = self._get_mode()
             multi, num_ops, items_per = self._get_multi_settings()
-            
-            Clock.schedule_once(lambda dt: self._set_status("Calcolo..."), 0)
             
             all_idx = list(range(len(self.coords)))
             
@@ -1709,12 +1769,8 @@ class PercorsiApp(App):
                         'id': f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{oi+1}",
                         'name': f"Op{oi+1} - {datetime.now().strftime('%d/%m %H:%M')}",
                         'operator': f"Operatore {oi+1}",
-                        'coords': oc,
-                        'labels': ol,
-                        'orig_data': od,
-                        'distances': dists,
-                        'total': total,
-                        'stops': len(oc)
+                        'coords': oc, 'labels': ol, 'orig_data': od,
+                        'distances': dists, 'total': total, 'stops': len(oc)
                     })
                 
                 Clock.schedule_once(lambda dt: self._opt_done_multi(routes), 0)
@@ -1727,12 +1783,8 @@ class PercorsiApp(App):
                 route = {
                     'id': datetime.now().strftime('%Y%m%d_%H%M%S'),
                     'name': f"Percorso {datetime.now().strftime('%d/%m %H:%M')}",
-                    'coords': oc,
-                    'labels': ol,
-                    'orig_data': od,
-                    'distances': dists,
-                    'total': total,
-                    'stops': len(oc)
+                    'coords': oc, 'labels': ol, 'orig_data': od,
+                    'distances': dists, 'total': total, 'stops': len(oc)
                 }
                 Clock.schedule_once(lambda dt: self._opt_done(route), 0)
         except Exception as e:
@@ -1818,16 +1870,11 @@ class PercorsiApp(App):
             
             for r in reversed(self.saved_routes[-20:]):
                 box = BoxLayout(size_hint_y=None, height=70, padding=5, spacing=5)
-                box.canvas.before.clear()
-                with box.canvas.before:
-                    Color(0.18, 0.18, 0.22, 1)
-                    Rectangle(pos=box.pos, size=box.size)
-                box.bind(pos=lambda w,v: w.canvas.before.clear() or None)
                 
                 info = BoxLayout(orientation='vertical', size_hint_x=0.7)
                 info.add_widget(Label(text=r['name'], bold=True, halign='left', text_size=(250,None)))
                 info.add_widget(Label(text=f"{r['stops']} tappe - {self._fmt_dist(r['total'])}", 
-                                     font_size='12sp', color=(0.6,0.6,0.6,1), halign='left', text_size=(250,None)))
+                                     font_size='12sp', color=(0.6,0.6,0.6,1)))
                 
                 btn = Button(text='APRI', size_hint_x=0.3, background_color=(0.3,0.5,0.6,1), background_normal='')
                 btn.bind(on_release=lambda x, rt=r: self.show_route(rt))
@@ -1862,8 +1909,6 @@ class PercorsiApp(App):
         if links:
             import webbrowser
             webbrowser.open(links[0])
-            if len(links) > 1:
-                self.popup("Info", f"Percorso diviso in {len(links)} segmenti")
     
     # ==================== EXPORT ====================
     def _get_export_path(self, fname):
@@ -1884,9 +1929,7 @@ class PercorsiApp(App):
         for i, (c, l) in enumerate(zip(self.current_route['coords'], self.current_route['labels'])):
             d = self.current_route['distances'][i] if i < len(self.current_route['distances']) else 0
             cum += d
-            
             row = {'N': i+1, 'Lat': c[0], 'Lon': c[1], 'Label': l, 'Dist_m': d, 'Cum_m': cum}
-            
             od = self.current_route.get('orig_data', [])
             if i < len(od) and od[i]:
                 for k, v in od[i].items():
@@ -1894,8 +1937,10 @@ class PercorsiApp(App):
                         row[k] = v
             rows.append(row)
         
-        fp = self._get_export_path(f"percorso_{self.current_route['id']}.xlsx")
-        ok, res = export_excel(rows, fp)
+        # Usa xlsx se disponibile, altrimenti csv
+        ext = '.xlsx' if OPENPYXL_AVAILABLE else '.csv'
+        fp = self._get_export_path(f"percorso_{self.current_route['id']}{ext}")
+        ok, res = export_data(rows, fp)
         self.popup("Export" if ok else "Errore", res)
     
     def do_export_gpx(self):
@@ -1947,15 +1992,7 @@ class PercorsiApp(App):
         try:
             data = []
             for r in self.saved_routes[-50:]:
-                data.append({
-                    'id': r['id'],
-                    'name': r['name'],
-                    'coords': r['coords'],
-                    'labels': r['labels'],
-                    'distances': r['distances'],
-                    'total': r['total'],
-                    'stops': r['stops']
-                })
+                data.append({k: r[k] for k in ['id','name','coords','labels','distances','total','stops'] if k in r})
             with open(self._get_data_path(), 'w') as f:
                 json.dump(data, f)
         except Exception as e:
@@ -1966,19 +2003,19 @@ class PercorsiApp(App):
             fp = self._get_data_path()
             if os.path.exists(fp):
                 with open(fp, 'r') as f:
-                    data = json.load(f)
-                self.saved_routes = data
-        except Exception as e:
-            log_error(f"Load: {e}")
+                    self.saved_routes = json.load(f)
+        except:
             self.saved_routes = []
     
     # ==================== UTILS ====================
     def popup(self, title, msg):
         content = BoxLayout(orientation='vertical', padding=10, spacing=10)
-        content.add_widget(Label(text=str(msg), text_size=(300, None)))
+        lbl = Label(text=str(msg), text_size=(300, None), halign='center')
+        lbl.bind(texture_size=lbl.setter('size'))
+        content.add_widget(lbl)
         btn = Button(text='OK', size_hint_y=None, height=45, background_color=(0.3,0.5,0.7,1), background_normal='')
         content.add_widget(btn)
-        p = Popup(title=title, content=content, size_hint=(0.85, 0.4))
+        p = Popup(title=title, content=content, size_hint=(0.85, 0.5))
         btn.bind(on_release=p.dismiss)
         p.open()
 
